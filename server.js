@@ -26,6 +26,11 @@ function loadBoard(){
 }
 function saveBoard(b){ try{ fs.writeFileSync(BOARD_FILE, JSON.stringify(b)); }catch(e){} }
 
+// ---- 🆔 name registry: each name is owned by ONE person (identified by a secret device token) ----
+const USERS_FILE = path.join(__dirname, 'lincusers.json');
+function loadUsers(){ try{ return JSON.parse(fs.readFileSync(USERS_FILE,'utf8')); }catch(e){ return {}; } }
+function saveUsers(u){ try{ fs.writeFileSync(USERS_FILE, JSON.stringify(u)); }catch(e){} }
+
 function sendJSON(res, code, data){
   res.writeHead(code, { 'Content-Type':'application/json' });
   res.end(JSON.stringify(data));
@@ -39,6 +44,26 @@ http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, 'http://localhost');
+
+  // ---- 🆔 claim a unique name (POST {name, token}) — no two people can share a name ----
+  if (url.pathname === '/claim' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 1000) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const s = JSON.parse(body || '{}');
+        const name = String(s.name || '').replace(/[<>]/g, '').slice(0, 20).trim();
+        const token = String(s.token || '').slice(0, 80);
+        if (!name || !token) return sendJSON(res, 400, { error: 'bad request' });
+        const users = loadUsers();
+        const key = name.toLowerCase();
+        if (!users[key]) { users[key] = token; saveUsers(users); return sendJSON(res, 200, { ok: true }); }   // free → claim it
+        if (users[key] === token) return sendJSON(res, 200, { ok: true });                                    // it's you → welcome back
+        return sendJSON(res, 200, { ok: false, taken: true });                                                // someone else has it
+      } catch (e) { sendJSON(res, 400, { error: 'bad request' }); }
+    });
+    return;
+  }
 
   // ---- 🌍 GET the global leaderboard ----
   if (url.pathname === '/leaderboard' && req.method === 'GET') {

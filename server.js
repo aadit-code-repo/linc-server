@@ -1,11 +1,8 @@
 // ============================================================
-//  🔒🌍 LINC SERVER — two jobs in one little program:
-//    1) 🌍 GLOBAL LEADERBOARD (no API key needed!) — so friends
-//       on DIFFERENT computers all share ONE Reaction-Race board.
-//    2) 🔒 (optional) secret AI key-server for a real AI brain.
-//
-//  A grown-up runs this, then pastes its web address into
-//  GLOBAL_LB_URL inside "Linc AI File.html". See README-FOR-PARENT.md.
+//  🔒🌍 LINC SERVER — jobs in one little program:
+//    1) 🌍 GLOBAL LEADERBOARD (no API key needed!)
+//    2) 🟢 ACTIVE USERS counter
+//    3) 🧠 (optional) AI brain via Gemini (needs a key)
 // ============================================================
 
 const http = require('http');
@@ -30,6 +27,10 @@ function saveBoard(b){ try{ fs.writeFileSync(BOARD_FILE, JSON.stringify(b)); }ca
 const USERS_FILE = path.join(__dirname, 'lincusers.json');
 function loadUsers(){ try{ return JSON.parse(fs.readFileSync(USERS_FILE,'utf8')); }catch(e){ return {}; } }
 function saveUsers(u){ try{ fs.writeFileSync(USERS_FILE, JSON.stringify(u)); }catch(e){} }
+
+// ---- 🟢 who's online right now: token -> last time we heard from them ----
+const ACTIVE = {};
+function activeCount(){ const now = Date.now(); for (const k in ACTIVE) { if (now - ACTIVE[k] > 60000) delete ACTIVE[k]; } return Object.keys(ACTIVE).length; }
 
 function sendJSON(res, code, data){
   res.writeHead(code, { 'Content-Type':'application/json' });
@@ -94,17 +95,37 @@ http.createServer((req, res) => {
     return;
   }
 
-  // ---- 🔒 (optional) ask the hidden AI brain ----
+  // ---- 🟢 heartbeat: a visitor checks in, we reply with how many are online now ----
+  if (url.pathname === '/active' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 500) req.destroy(); });
+    req.on('end', () => {
+      try { const s = JSON.parse(body || '{}'); const t = String(s.token || '').slice(0, 80);
+        if (t) ACTIVE[t] = Date.now();
+        sendJSON(res, 200, { count: activeCount() });
+      } catch (e) { sendJSON(res, 200, { count: activeCount() }); }
+    });
+    return;
+  }
+
+  // ---- 🧠 the hidden AI brain (Gemini) — needs GEMINI_API_KEY set on the server ----
   if (url.pathname === '/ask') {
-    const question = url.searchParams.get('q') || '';
-    if (!KEY) return sendJSON(res, 500, { error: "No AI key set — see README-FOR-PARENT.md. (The leaderboard works without a key!)" });
-    fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + KEY,
+    const question = (url.searchParams.get('q') || '').slice(0, 2000);
+    if (!KEY) return sendJSON(res, 500, { error: "No AI key set — see README-FOR-PARENT.md. (Everything else works without a key!)" });
+    const MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';   // grown-up can change this if Google renames it
+    // 🧒 Linc's personality: kind, simple, safe for kids
+    const persona = "You are Linc, a friendly AI chatbot made by a young coder named Aadit, and you talk to kids. " +
+      "Answer in a warm, simple way a 9-year-old can understand. Keep it short — 1 to 3 sentences — and add a couple of fun emojis. " +
+      "Never share anything scary, adult, or unsafe; if a question isn't right for kids, gently say you can't help with that. " +
+      "Here is the kid's message: " + question;
+    fetch('https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent?key=' + KEY,
       { method:'POST', headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ contents:[{ parts:[{ text: question }] }] }) })
+        body: JSON.stringify({ contents:[{ parts:[{ text: persona }] }], generationConfig:{ maxOutputTokens: 300, temperature: 0.8 } }) })
       .then(r => r.json())
       .then(data => {
         const answer = (data.candidates && data.candidates[0] && data.candidates[0].content
-                        && data.candidates[0].content.parts[0].text) || "Hmm, I couldn't think of an answer.";
+                        && data.candidates[0].content.parts && data.candidates[0].content.parts[0]
+                        && data.candidates[0].content.parts[0].text) || "Hmm, I couldn't think of an answer to that one. 🤔";
         sendJSON(res, 200, { answer });
       })
       .catch(() => sendJSON(res, 500, { error: "Something went wrong reaching the AI." }));
@@ -113,4 +134,4 @@ http.createServer((req, res) => {
 
   res.writeHead(200, { 'Content-Type':'text/plain' });
   res.end("✅ Linc server is running! Global leaderboard is live at /leaderboard 🌍");
-}).listen(PORT, () => console.log("🌍 Linc server running on http://localhost:" + PORT + "  (leaderboard needs NO key!)"));
+}).listen(PORT, () => console.log("🌍 Linc server running on http://localhost:" + PORT));

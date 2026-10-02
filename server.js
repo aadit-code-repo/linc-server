@@ -154,7 +154,7 @@ http.createServer((req, res) => {
       try { const s = JSON.parse(body || '{}'); if (Array.isArray(s.messages)) msgs = s.messages; } catch (e) {}
       // keep only clean, valid messages (last ~14 so memory works but stays small)
       msgs = msgs.filter(m => m && typeof m.content === 'string' && ['system','user','assistant'].includes(m.role))
-                 .map(m => ({ role: m.role, content: m.content.slice(0, 4000) })).slice(-14);
+                 .map(m => ({ role: m.role, content: m.content.slice(0, 4000) })).slice(-60);   // keep the whole recent chat as memory
       if (!GK || !msgs.length) return sendJSON(res, 200, { answer: null });   // no key → client uses its backup brain
       // 🧒 make sure there's a kid-safe personality up front
       if (!msgs.some(m => m.role === 'system')) msgs.unshift({ role: 'system', content:

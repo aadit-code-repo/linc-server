@@ -161,7 +161,7 @@ http.createServer((req, res) => {
         "You are Linc, a smart, friendly kids' AI made by a young coder named Aadit. Answer warmly and simply for a 9-year-old, 1-4 sentences, with a couple fun emojis. Be accurate and don't make things up. Never say anything scary, violent, adult, or unsafe. Never say you're ChatGPT, OpenAI, or Google — you're Linc, made by Aadit. 💚" });
       fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GK },
-        body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile', messages: msgs, temperature: 0.7, max_tokens: 500 })
+        body: JSON.stringify({ model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b', messages: msgs, temperature: 0.7, max_tokens: 700, reasoning_effort: 'low' })
       })
         .then(r => r.json())
         .then(d => {

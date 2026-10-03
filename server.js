@@ -150,8 +150,11 @@ http.createServer((req, res) => {
     req.on('data', chunk => { body += chunk; if (body.length > 24000) req.destroy(); });
     req.on('end', () => {
       const GK = process.env.GROQ_API_KEY;
-      let msgs = [];
-      try { const s = JSON.parse(body || '{}'); if (Array.isArray(s.messages)) msgs = s.messages; } catch (e) {}
+      let msgs = [], wantModel = '';
+      try { const s = JSON.parse(body || '{}'); if (Array.isArray(s.messages)) msgs = s.messages; if (typeof s.model === 'string') wantModel = s.model; } catch (e) {}
+      // 🧠 the three named Linc brains the webpage can pick (Bolt/Flux/Vortex) — only these are allowed
+      const ALLOWED_MODELS = ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-120b'];
+      const MODEL = ALLOWED_MODELS.includes(wantModel) ? wantModel : (process.env.GROQ_MODEL || 'openai/gpt-oss-120b');
       // keep only clean, valid messages (last ~14 so memory works but stays small)
       msgs = msgs.filter(m => m && typeof m.content === 'string' && ['system','user','assistant'].includes(m.role))
                  .map(m => ({ role: m.role, content: m.content.slice(0, 4000) })).slice(-60);   // keep the whole recent chat as memory
@@ -161,7 +164,7 @@ http.createServer((req, res) => {
         "You are Linc, a smart, friendly kids' AI made by a young coder named Aadit. Answer warmly and simply for a 9-year-old, 1-4 sentences, with a couple fun emojis. Be accurate and don't make things up. Never say anything scary, violent, adult, or unsafe. Never say you're ChatGPT, OpenAI, or Google — you're Linc, made by Aadit. 💚" });
       fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GK },
-        body: JSON.stringify({ model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b', messages: msgs, temperature: 0.7, max_tokens: 700, reasoning_effort: 'low' })
+        body: JSON.stringify({ model: MODEL, messages: msgs, temperature: 0.7, max_tokens: 700, reasoning_effort: 'low' })
       })
         .then(r => r.json())
         .then(d => {

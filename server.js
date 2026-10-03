@@ -201,7 +201,8 @@ http.createServer((req, res) => {
         .then(r => r.json())
         .then(d => {
           const a = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
-          sendJSON(res, 200, { answer: (a && a.trim()) ? a : null });
+          const tk = d && d.usage && d.usage.total_tokens;
+          sendJSON(res, 200, { answer: (a && a.trim()) ? a : null, tokens: tk || null });
         })
         .catch(() => sendJSON(res, 200, { answer: null }));   // any problem → null (client falls back)
     });

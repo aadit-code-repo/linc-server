@@ -40,6 +40,34 @@ function sendJSON(res, code, data){
   res.end(JSON.stringify(data));
 }
 
+// ---- 🛡️ ABUSE PROTECTION: only let Linc's own website use the costly endpoints, and limit how fast anyone can hit them ----
+// 🌐 which websites are allowed to use /ai and /search (add more here if you make new sites)
+const ALLOWED_ORIGINS = ['https://linc-ai.netlify.app'];
+function originOK(req){
+  const o = req.headers['origin'] || '';
+  if (!o) return true;                                   // non-browser tools have no Origin — the rate limit still guards them
+  if (ALLOWED_ORIGINS.includes(o)) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) return true;   // local testing
+  if (/^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(o)) return true;          // Netlify preview deploys
+  return false;
+}
+// ⏱️ simple per-IP rate limit (in-memory): no more than MAX requests per WINDOW
+const RATE = {};
+function rateLimited(req, max, windowMs){
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const arr = (RATE[ip] || []).filter(t => now - t < windowMs);
+  arr.push(now); RATE[ip] = arr;
+  if (Object.keys(RATE).length > 5000) { for (const k in RATE) { if (!RATE[k].some(t => now - t < windowMs)) delete RATE[k]; } }   // tidy up
+  return arr.length > max;
+}
+// 🚦 guard the costly endpoints (/ai, /search): returns true if the request was blocked (and already answered)
+function guard(req, res){
+  if (!originOK(req)) { sendJSON(res, 403, { error: 'not allowed' }); return true; }
+  if (rateLimited(req, 40, 60000)) { sendJSON(res, 429, { error: 'too many requests — slow down a sec!' }); return true; }   // 40/min per person
+  return false;
+}
+
 http.createServer((req, res) => {
   // let the Linc webpage talk to this server from anywhere
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -116,6 +144,7 @@ http.createServer((req, res) => {
   //      A grown-up gets a free key at https://tavily.com → sets SEARCH_API_KEY on the server.
   //      No key set? → returns empty, and Linc falls back to Wikipedia automatically. ----
   if (url.pathname === '/search' && req.method === 'GET') {
+    if (guard(req, res)) return;   // 🛡️ origin + rate-limit check
     const q = (url.searchParams.get('q') || '').slice(0, 300).trim();
     const SKEY = process.env.SEARCH_API_KEY;
     if (!q || !SKEY) return sendJSON(res, 200, { results: [] });
@@ -146,6 +175,7 @@ http.createServer((req, res) => {
   //      https://console.groq.com/keys → sets GROQ_API_KEY on the server. No key? → returns null, and Linc
   //      falls back to the keyless Pollinations brain automatically. Takes the whole chat so Linc REMEMBERS. ----
   if (url.pathname === '/ai' && req.method === 'POST') {
+    if (guard(req, res)) return;   // 🛡️ origin + rate-limit check
     let body = '';
     req.on('data', chunk => { body += chunk; if (body.length > 24000) req.destroy(); });
     req.on('end', () => {

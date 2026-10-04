@@ -146,6 +146,8 @@ http.createServer((req, res) => {
   if (url.pathname === '/search' && req.method === 'GET') {
     if (guard(req, res)) return;   // 🛡️ origin + rate-limit check
     const q = (url.searchParams.get('q') || '').slice(0, 300).trim();
+    const depth = (url.searchParams.get('depth') === 'advanced') ? 'advanced' : 'basic';   // 🔬 deep research = more, deeper results
+    const maxr = depth === 'advanced' ? 8 : 5;
     const SKEY = process.env.SEARCH_API_KEY;
     if (!q || !SKEY) return sendJSON(res, 200, { results: [] });
     // 🧒 kid-safe filter: drop any snippet with grown-up / scary words
@@ -153,7 +155,7 @@ http.createServer((req, res) => {
     const strip = s => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
     fetch('https://api.tavily.com/search', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: SKEY, query: q, max_results: 5, search_depth: 'basic', include_answer: true })
+      body: JSON.stringify({ api_key: SKEY, query: q, max_results: maxr, search_depth: depth, include_answer: true })
     })
       .then(r => r.json())
       .then(d => {
@@ -163,7 +165,7 @@ http.createServer((req, res) => {
         for (const it of items) {
           const text = strip((it.title ? it.title + ' — ' : '') + (it.content || ''));
           if (text && text.length > 25 && !BAD.test(text)) snips.push(text.slice(0, 320));
-          if (snips.length >= 5) break;
+          if (snips.length >= maxr) break;
         }
         sendJSON(res, 200, { results: snips });
       })
@@ -177,27 +179,62 @@ http.createServer((req, res) => {
   if (url.pathname === '/ai' && req.method === 'POST') {
     if (guard(req, res)) return;   // 🛡️ origin + rate-limit check
     let body = '';
-    req.on('data', chunk => { body += chunk; if (body.length > 24000) req.destroy(); });
+    req.on('data', chunk => { body += chunk; if (body.length > 6000000) req.destroy(); });   // 📸 bigger: room for a photo (vision) or a document
     req.on('end', () => {
       const GK = process.env.GROQ_API_KEY;
-      let msgs = [], wantModel = '', wantEffort = '';
-      try { const s = JSON.parse(body || '{}'); if (Array.isArray(s.messages)) msgs = s.messages; if (typeof s.model === 'string') wantModel = s.model; if (typeof s.effort === 'string') wantEffort = s.effort; } catch (e) {}
+      let msgs = [], wantModel = '', wantEffort = '', wantStream = false;
+      try { const s = JSON.parse(body || '{}'); if (Array.isArray(s.messages)) msgs = s.messages; if (typeof s.model === 'string') wantModel = s.model; if (typeof s.effort === 'string') wantEffort = s.effort; wantStream = !!s.stream; } catch (e) {}
       // 🧠 the named Linc brains the webpage can pick (Bolt/Flux/Vortex) — only these are allowed
       const ALLOWED_MODELS = ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-120b'];
-      const MODEL = ALLOWED_MODELS.includes(wantModel) ? wantModel : (process.env.GROQ_MODEL || 'openai/gpt-oss-120b');
-      // 🧠 "think harder" level for the Pro brains (Bolt 2.0 / Vortex 4.5)
+      // 📸 the eyes: a vision model Linc uses when a picture is sent (a grown-up can override with GROQ_VISION_MODEL)
+      const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
       const EFFORT = ['low', 'medium', 'high'].includes(wantEffort) ? wantEffort : 'low';
-      // keep only clean, valid messages (last ~14 so memory works but stays small)
-      msgs = msgs.filter(m => m && typeof m.content === 'string' && ['system','user','assistant'].includes(m.role))
-                 .map(m => ({ role: m.role, content: m.content.slice(0, 4000) })).slice(-60);   // keep the whole recent chat as memory
+      // ✅ keep only clean messages. content may be a STRING, or (for vision) an array of {type:text}/{type:image_url}
+      let hasImage = false;
+      msgs = msgs.map(m => {
+        if (!m || !['system','user','assistant'].includes(m.role)) return null;
+        if (typeof m.content === 'string') return { role: m.role, content: m.content.slice(0, 12000) };   // 📄 bigger cap for document Q&A
+        if (Array.isArray(m.content)) {
+          const parts = [];
+          for (const p of m.content) {
+            if (!p || typeof p !== 'object') continue;
+            if (p.type === 'text' && typeof p.text === 'string') parts.push({ type: 'text', text: p.text.slice(0, 12000) });
+            else if (p.type === 'image_url' && p.image_url && typeof p.image_url.url === 'string' && /^data:image\//.test(p.image_url.url) && p.image_url.url.length < 4000000) { parts.push({ type: 'image_url', image_url: { url: p.image_url.url } }); hasImage = true; }
+            if (parts.length >= 6) break;
+          }
+          return parts.length ? { role: m.role, content: parts } : null;
+        }
+        return null;
+      }).filter(Boolean).slice(-60);
       if (!GK || !msgs.length) return sendJSON(res, 200, { answer: null });   // no key → client uses its backup brain
       // 🧒 make sure there's a kid-safe personality up front
       if (!msgs.some(m => m.role === 'system')) msgs.unshift({ role: 'system', content:
-        "You are Linc, a smart, friendly kids' AI made by a young coder named Aadit. Answer warmly and simply for a 9-year-old, 1-4 sentences, with a couple fun emojis. Be accurate and don't make things up. Never say anything scary, violent, adult, or unsafe. Never say you're ChatGPT, OpenAI, or Google — you're Linc, made by Aadit. 💚" });
-      fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GK },
-        body: JSON.stringify({ model: MODEL, messages: msgs, temperature: 0.7, max_tokens: 700, reasoning_effort: EFFORT })
-      })
+        "You are Linc, a smart, friendly kids' AI made by a young coder named Aadit. Answer warmly and simply for a 9-year-old, with a couple fun emojis. Be accurate and don't make things up. Never say anything scary, violent, adult, or unsafe. Never say you're ChatGPT, OpenAI, or Google — you're Linc, made by Aadit. 💚" });
+      // 🧠 pick the brain: a picture → the vision model; otherwise the kid's chosen Bolt/Flux/Vortex
+      const MODEL = hasImage ? VISION_MODEL : (ALLOWED_MODELS.includes(wantModel) ? wantModel : (process.env.GROQ_MODEL || 'openai/gpt-oss-120b'));
+      const payload = { model: MODEL, messages: msgs, temperature: 0.7, max_tokens: hasImage ? 900 : 800 };
+      if (/^openai\/gpt-oss/.test(MODEL)) payload.reasoning_effort = EFFORT;   // only the gpt-oss "reasoning" brains take this
+      const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+      const AUTH = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GK };
+
+      // ⚡ STREAMING: pipe Groq's live tokens straight through to the webpage (feels like a real AI typing)
+      if (wantStream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+        fetch(GROQ_URL, { method: 'POST', headers: AUTH, body: JSON.stringify(Object.assign({}, payload, { stream: true, stream_options: { include_usage: true } })) })
+          .then(async upstream => {
+            if (!upstream.ok || !upstream.body) { try { res.write('data: {"error":true}\n\n'); } catch (e) {} res.end(); return; }
+            const reader = upstream.body.getReader(); const dec = new TextDecoder();
+            try {
+              for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(dec.decode(value, { stream: true })); }
+            } catch (e) {}
+            res.end();
+          })
+          .catch(() => { try { res.write('data: {"error":true}\n\n'); res.end(); } catch (e) {} });
+        return;
+      }
+
+      // 📦 normal (whole-answer-at-once) reply — used for vision, docs, and as the streaming fallback
+      fetch(GROQ_URL, { method: 'POST', headers: AUTH, body: JSON.stringify(payload) })
         .then(r => r.json())
         .then(d => {
           const a = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;

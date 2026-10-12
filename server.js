@@ -64,7 +64,7 @@ function rateLimited(req, max, windowMs){
 // üö¶ guard the costly endpoints (/ai, /search): returns true if the request was blocked (and already answered)
 function guard(req, res){
   if (!originOK(req)) { sendJSON(res, 403, { error: 'not allowed' }); return true; }
-  if (rateLimited(req, 40, 60000)) { sendJSON(res, 429, { error: 'too many requests ‚Äî slow down a sec!' }); return true; }   // 40/min per person
+  if (rateLimited(req, 90, 60000)) { sendJSON(res, 429, { error: 'too many requests ‚Äî slow down a sec!' }); return true; }   // 90/min per person (room for translating a whole page at once)
   return false;
 }
 
@@ -264,7 +264,8 @@ http.createServer((req, res) => {
         fd.append('model', process.env.GROQ_ASR_MODEL || 'whisper-large-v3-turbo');
         fd.append('response_format', 'json');
         const langMap = { English:'en', Spanish:'es', French:'fr', German:'de', Hindi:'hi', Chinese:'zh', Arabic:'ar', Japanese:'ja', Portuguese:'pt' };
-        if (langMap[lang]) fd.append('language', langMap[lang]);
+        const asr = /^[a-z]{2}$/i.test(lang) ? lang.toLowerCase() : (langMap[lang] || 'en');   // accept a 2-letter code (any language) or a name; default English
+        fd.append('language', asr);
         const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + GK }, body: fd });
         const d = await r.json();
         sendJSON(res, 200, { text: (d && d.text) ? String(d.text).trim() : null });

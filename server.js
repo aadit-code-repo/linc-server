@@ -35,6 +35,23 @@ function saveUsers(u){ try{ fs.writeFileSync(USERS_FILE, JSON.stringify(u)); }ca
 const ACTIVE = {};
 function activeCount(){ const now = Date.now(); for (const k in ACTIVE) { if (now - ACTIVE[k] > 60000) delete ACTIVE[k]; } return Object.keys(ACTIVE).length; }
 
+// ---- üö´ kid-safe word filter (used by /search AND the live feed) ----
+const BAD_WORDS = /\b(nude|naked|nsfw|sex|sexual|sexy|porn|porno|xxx|boob|penis|vagina|nipple|kill|killing|murder|gore|gory|corpse|blood|suicide|drug|cocaine|heroin|meth|cigarette|vape|nazi|hitler|racist|terrorist|isis|fuck|fucking|shit|bitch|slut|whore|dick|damn|gambling|casino|betting)\b/i;
+
+// ---- üî≠ LIVE FEED: the last few things people asked Linc (anonymous + filtered). In-memory, newest last. ----
+const FEED = [];
+function feedAdd(q){
+  q = String(q || '').replace(/\s+/g, ' ').trim();
+  if (q.length < 4 || q.length > 120) return;
+  if (BAD_WORDS.test(q)) return;                                   // no rude stuff
+  if (/@|https?:\/\//i.test(q)) return;                            // no emails / links
+  if (/\b\d[\d\-.\s]{6,}\d\b/.test(q)) return;                     // no phone/long number sequences
+  if (/\bmy (name|full name|address|phone|email|number|password|house|street|school|teacher)\b|\bi live\b|\bi'?m \d{1,2}\b|\bi am \d{1,2}\b/i.test(q)) return;   // no personal info
+  if (FEED.some(f => f.q.toLowerCase() === q.toLowerCase())) return;   // no duplicates
+  FEED.push({ q: q.slice(0, 120), t: Date.now() });
+  while (FEED.length > 30) FEED.shift();
+}
+
 function sendJSON(res, code, data){
   res.writeHead(code, { 'Content-Type':'application/json; charset=utf-8' });   // üî§ serve UTF-8 so dashes/quotes never turn into ‚Äö√Ñ√Æ
   res.end(JSON.stringify(data));
@@ -42,13 +59,14 @@ function sendJSON(res, code, data){
 
 // ---- üõ°Ô∏è ABUSE PROTECTION: only let Linc's own website use the costly endpoints, and limit how fast anyone can hit them ----
 // üåê which websites are allowed to use /ai and /search (add more here if you make new sites)
-const ALLOWED_ORIGINS = ['https://linc-ai.netlify.app'];
+const ALLOWED_ORIGINS = ['https://linc-ai.netlify.app', 'https://linc-ai-official.github.io', 'https://linc.is-cool.dev', 'https://linc-ai.is-local.org'];
 function originOK(req){
   const o = req.headers['origin'] || '';
   if (!o) return true;                                   // non-browser tools have no Origin ‚Äî the rate limit still guards them
   if (ALLOWED_ORIGINS.includes(o)) return true;
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) return true;   // local testing
   if (/^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(o)) return true;          // Netlify preview deploys
+  if (/^https:\/\/[a-z0-9-]+\.github\.io$/.test(o)) return true;            // GitHub Pages sites
   return false;
 }
 // ‚è±Ô∏è simple per-IP rate limit (in-memory): no more than MAX requests per WINDOW
@@ -64,7 +82,7 @@ function rateLimited(req, max, windowMs){
 // üö¶ guard the costly endpoints (/ai, /search): returns true if the request was blocked (and already answered)
 function guard(req, res){
   if (!originOK(req)) { sendJSON(res, 403, { error: 'not allowed' }); return true; }
-  if (rateLimited(req, 40, 60000)) { sendJSON(res, 429, { error: 'too many requests ‚Äî slow down a sec!' }); return true; }   // 40/min per person
+  if (rateLimited(req, 90, 60000)) { sendJSON(res, 429, { error: 'too many requests ‚Äî slow down a sec!' }); return true; }   // 90/min per person (room for translating a whole page at once)
   return false;
 }
 
@@ -135,6 +153,22 @@ http.createServer((req, res) => {
         if (t) ACTIVE[t] = Date.now();
         sendJSON(res, 200, { count: activeCount() });
       } catch (e) { sendJSON(res, 200, { count: activeCount() }); }
+    });
+    return;
+  }
+
+  // ---- üî≠ LIVE FEED: GET the last few (anonymous, filtered) things people asked Linc ----
+  if (url.pathname === '/feed' && req.method === 'GET') {
+    return sendJSON(res, 200, { items: FEED.slice(-20).reverse() });   // newest first
+  }
+  // ---- üî≠ share a question to the live feed (POST {q}) ‚Äî heavily filtered, anonymous ----
+  if (url.pathname === '/feedpost' && req.method === 'POST') {
+    if (guard(req, res)) return;
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 1000) req.destroy(); });
+    req.on('end', () => {
+      try { const s = JSON.parse(body || '{}'); feedAdd(s.q); } catch (e) {}
+      sendJSON(res, 200, { ok: true });
     });
     return;
   }
@@ -217,31 +251,53 @@ http.createServer((req, res) => {
       const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
       const AUTH = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + GK };
 
-      // ‚ö° STREAMING: pipe Groq's live tokens straight through to the webpage (feels like a real AI typing)
+      // üõ°Ô∏è BACKUP BRAIN (Cerebras) ‚Äî only used if Groq ever fails/goes down. A grown-up (or Aadit, 13+) gets a free
+      //     key at https://cloud.cerebras.ai ‚Üí sets CEREBRAS_API_KEY on the server. No key? ‚Üí no backup, Groq-only (that's fine).
+      const CK = process.env.CEREBRAS_API_KEY;
+      const CEREBRAS_URL = 'https://api.cerebras.ai/v1/chat/completions';
+      const CEREBRAS_MODEL = process.env.CEREBRAS_MODEL || 'llama-3.3-70b';
+      const CAUTH = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CK };
+      const canBackup = !!CK && !hasImage;   // Cerebras backup is text-only (no pictures)
+      const cerebrasBody = extra => Object.assign({ model: CEREBRAS_MODEL, messages: msgs, temperature: 0.7, max_tokens: 800 }, extra || {});
+
+      // ‚ö° STREAMING helper: pipe a brain's live tokens straight through to the webpage (feels like a real AI typing).
+      //    Returns true if it streamed ok; false (without writing anything) if that brain couldn't start ‚Äî so we can try the backup.
+      const streamFrom = (u, auth, bodyObj) =>
+        fetch(u, { method: 'POST', headers: auth, body: JSON.stringify(bodyObj) })
+          .then(async upstream => {
+            if (!upstream.ok || !upstream.body) return false;
+            const reader = upstream.body.getReader(); const dec = new TextDecoder();
+            try { for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(dec.decode(value, { stream: true })); } } catch (e) {}
+            return true;
+          })
+          .catch(() => false);
+
       if (wantStream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-        fetch(GROQ_URL, { method: 'POST', headers: AUTH, body: JSON.stringify(Object.assign({}, payload, { stream: true, stream_options: { include_usage: true } })) })
-          .then(async upstream => {
-            if (!upstream.ok || !upstream.body) { try { res.write('data: {"error":true}\n\n'); } catch (e) {} res.end(); return; }
-            const reader = upstream.body.getReader(); const dec = new TextDecoder();
-            try {
-              for (;;) { const { done, value } = await reader.read(); if (done) break; res.write(dec.decode(value, { stream: true })); }
-            } catch (e) {}
-            res.end();
+        streamFrom(GROQ_URL, AUTH, Object.assign({}, payload, { stream: true, stream_options: { include_usage: true } }))
+          .then(async okGroq => {
+            if (okGroq) return;                                                                 // ‚úÖ Groq streamed fine
+            if (canBackup && await streamFrom(CEREBRAS_URL, CAUTH, cerebrasBody({ stream: true }))) return;   // üõ°Ô∏è Cerebras backup saved it
+            try { res.write('data: {"error":true}\n\n'); } catch (e) {}
           })
-          .catch(() => { try { res.write('data: {"error":true}\n\n'); res.end(); } catch (e) {} });
+          .catch(() => { try { res.write('data: {"error":true}\n\n'); } catch (e) {} })
+          .then(() => { try { res.end(); } catch (e) {} });
         return;
       }
 
-      // üì¶ normal (whole-answer-at-once) reply ‚Äî used for vision, docs, and as the streaming fallback
-      fetch(GROQ_URL, { method: 'POST', headers: AUTH, body: JSON.stringify(payload) })
-        .then(r => r.json())
-        .then(d => {
-          const a = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
-          const tk = d && d.usage && d.usage.total_tokens;
-          sendJSON(res, 200, { answer: (a && a.trim()) ? a : null, tokens: tk || null });
-        })
-        .catch(() => sendJSON(res, 200, { answer: null }));   // any problem ‚Üí null (client falls back)
+      // üì¶ normal (whole-answer-at-once) reply ‚Äî used for vision, docs, and as the streaming fallback.
+      const askOnce = (u, auth, bodyObj) =>
+        fetch(u, { method: 'POST', headers: auth, body: JSON.stringify(bodyObj) })
+          .then(r => r.json())
+          .then(d => {
+            const a = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+            const tk = d && d.usage && d.usage.total_tokens;
+            return { answer: (a && a.trim()) ? a : null, tokens: tk || null };
+          })
+          .catch(() => ({ answer: null, tokens: null }));
+      askOnce(GROQ_URL, AUTH, payload)
+        .then(r => (r.answer || !canBackup) ? r : askOnce(CEREBRAS_URL, CAUTH, cerebrasBody()))   // üõ°Ô∏è Groq empty? ‚Üí try Cerebras backup
+        .then(r => sendJSON(res, 200, r));
     });
     return;
   }
@@ -264,7 +320,8 @@ http.createServer((req, res) => {
         fd.append('model', process.env.GROQ_ASR_MODEL || 'whisper-large-v3-turbo');
         fd.append('response_format', 'json');
         const langMap = { English:'en', Spanish:'es', French:'fr', German:'de', Hindi:'hi', Chinese:'zh', Arabic:'ar', Japanese:'ja', Portuguese:'pt' };
-        if (langMap[lang]) fd.append('language', langMap[lang]);
+        const asr = /^[a-z]{2}$/i.test(lang) ? lang.toLowerCase() : (langMap[lang] || 'en');   // accept a 2-letter code (any language) or a name; default English
+        fd.append('language', asr);
         const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { 'Authorization': 'Bearer ' + GK }, body: fd });
         const d = await r.json();
         sendJSON(res, 200, { text: (d && d.text) ? String(d.text).trim() : null });
